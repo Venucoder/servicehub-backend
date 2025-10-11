@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: servicehub_db
+    environment:
+      POSTGRES_DB: servicehub_dev
+      POSTGRES_USER: servicehub_user
+      POSTGRES_PASSWORD: secure_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: servicehub_redis
+    ports:
+      - "6381:6381"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  backend:
+    build: .
+    container_name: servicehub_backend
+    ports:
+      - "8002:8002"
+    depends_on:
+      - db
+      - redis
+    environment:
+      - DEBUG=True
+      - DB_HOST=db
+      - DB_NAME=servicehub_dev
+      - DB_USER=servicehub_user
+      - DB_PASSWORD=secure_password
+      - REDIS_URL=redis://redis:6381/0
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
