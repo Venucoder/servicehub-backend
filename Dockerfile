@@ -1,8 +1,11 @@
-FROM python:3.10-slim
+# Use Python 3.11 slim image
+FROM python:3.11-slim
 
 # Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Set work directory
 WORKDIR /app
@@ -13,21 +16,35 @@ RUN apt-get update \
         postgresql-client \
         build-essential \
         libpq-dev \
+        curl \
+        netcat-traditional \
     && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -r django && useradd -r -g django django
 
 # Install Python dependencies
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy project
-COPY . /app/
+# Copy project files
+COPY backend/ /app/
+COPY docker-entrypoint.sh /app/
 
-# Create non-root user
-RUN adduser --disabled-password --gecos '' appuser && chown -R appuser /app
-USER appuser
+# Create necessary directories and set permissions
+RUN mkdir -p /app/staticfiles /app/media \
+    && chmod +x /app/docker-entrypoint.sh \
+    && chown -R django:django /app
+
+# Switch to non-root user
+USER django
 
 # Expose port
 EXPOSE 8002
 
-# Command to run the application
-CMD ["python", "backend/manage.py", "runserver", "0.0.0.0:8002"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8002/api/health/ || exit 1
+
+# Run entrypoint script
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

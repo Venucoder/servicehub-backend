@@ -1,0 +1,155 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: servicehub_db_prod
+    environment:
+      POSTGRES_DB: servicehub_prod
+      POSTGRES_USER: servicehub_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - servicehub_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U servicehub_user -d servicehub_prod"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: servicehub_redis_prod
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data_prod:/data
+    restart: unless-stopped
+    networks:
+      - servicehub_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  backend:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: servicehub_backend_prod
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DEBUG=False
+      - DB_HOST=db
+      - DB_NAME=servicehub_prod
+      - DB_USER=servicehub_user
+      - DB_PASSWORD=${DB_PASSWORD}
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS}
+      - DJANGO_SUPERUSER_EMAIL=${DJANGO_SUPERUSER_EMAIL}
+      - DJANGO_SUPERUSER_PASSWORD=${DJANGO_SUPERUSER_PASSWORD}
+      - USE_S3=${USE_S3:-False}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME}
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - EMAIL_HOST=${EMAIL_HOST}
+      - EMAIL_HOST_USER=${EMAIL_HOST_USER}
+      - EMAIL_HOST_PASSWORD=${EMAIL_HOST_PASSWORD}
+    volumes:
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+    restart: unless-stopped
+    networks:
+      - servicehub_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/api/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  celery_worker:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: servicehub_celery_worker_prod
+    command: celery -A servicehub worker -l info --concurrency=2
+    depends_on:
+      - db
+      - redis
+      - backend
+    environment:
+      - DEBUG=False
+      - DB_HOST=db
+      - DB_NAME=servicehub_prod
+      - DB_USER=servicehub_user
+      - DB_PASSWORD=${DB_PASSWORD}
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY}
+    volumes:
+      - media_volume:/app/media
+    restart: unless-stopped
+    networks:
+      - servicehub_network
+
+  celery_beat:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: servicehub_celery_beat_prod
+    command: celery -A servicehub beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    depends_on:
+      - db
+      - redis
+      - backend
+    environment:
+      - DEBUG=False
+      - DB_HOST=db
+      - DB_NAME=servicehub_prod
+      - DB_USER=servicehub_user
+      - DB_PASSWORD=${DB_PASSWORD}
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY}
+    restart: unless-stopped
+    networks:
+      - servicehub_network
+
+  nginx:
+    image: nginx:alpine
+    container_name: servicehub_nginx_prod
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - static_volume:/app/staticfiles:ro
+      - media_volume:/app/media:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - servicehub_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data_prod:
+  redis_data_prod:
+  static_volume:
+  media_volume:
+
+networks:
+  servicehub_network:
+    driver: bridge
