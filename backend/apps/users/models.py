@@ -1,9 +1,10 @@
+import uuid
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 
 class User(AbstractUser):
     """
-    Custom User model for ServiceHub with additional fields.
+    Custom User model for ServiceHub with UUID primary key.
     """
     
     USER_ROLES = (
@@ -12,6 +13,7 @@ class User(AbstractUser):
         ('admin', 'Administrator'),
     )
     
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     phone = models.CharField(max_length=15, unique=True)
     role = models.CharField(max_length=20, choices=USER_ROLES, default='customer')
     is_phone_verified = models.BooleanField(default=False)

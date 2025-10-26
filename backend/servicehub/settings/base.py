@@ -52,6 +52,12 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "apps.users",
+    "apps.orders",
+    "apps.services",
+    "apps.payments",
+    "rest_framework",
+    "rest_framework_simplejwt",
+    "drf_spectacular",
 ]
 
 MIDDLEWARE = [
