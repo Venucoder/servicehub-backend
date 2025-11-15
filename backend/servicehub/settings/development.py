@@ -39,7 +39,12 @@ DATABASES = {
 }
 
 # Disable CORS restrictions in development
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_ALL_ORIGINS = False  # Changed to False
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+CORS_ALLOW_CREDENTIALS = True
 
 # Email backend for development (console)
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
