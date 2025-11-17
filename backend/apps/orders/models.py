@@ -1,13 +1,15 @@
+# backend/apps/orders/models.py
 import uuid
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
-from apps.services.models import Service, Subscription
+from apps.services.models import Service
 
 
 class Order(models.Model):
     """
-    One-time orders placed by customers
+    One-time orders (NOT prepaid cards)
+    Can be immediate or scheduled
     """
     ORDER_STATUS = (
         ('pending', 'Pending'),
@@ -17,10 +19,6 @@ class Order(models.Model):
         ('completed', 'Completed'),
         ('cancelled', 'Cancelled'),
         ('refunded', 'Refunded'),
-    )
-    
-    ORDER_TYPE = (
-        ('one_time', 'One Time Purchase'),
     )
     
     DELIVERY_TYPE = (
@@ -44,18 +42,31 @@ class Order(models.Model):
     )
     
     # Order details
-    order_type = models.CharField(max_length=20, choices=ORDER_TYPE, default='one_time')
     status = models.CharField(max_length=20, choices=ORDER_STATUS, default='pending')
-    quantity = models.IntegerField(default=1)
+    
+    # Quantity
+    quantity = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=1,
+        help_text="Can be 1, 0.5 (for 500ml), 2.5, etc."
+    )
+    quantity_label = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text="e.g., '1 Can', '500ml', '2 Liters'"
+    )
+    
+    # Pricing
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
     
-    # Delivery details (UPDATED)
+    # Delivery details
     delivery_type = models.CharField(
         max_length=20,
         choices=DELIVERY_TYPE,
         default='scheduled',
-        help_text="Immediate (within hours) or Scheduled (future date/time)"
+        help_text="Immediate (if shop open) or Scheduled (pick date/time)"
     )
     delivery_address = models.TextField()
     
@@ -67,11 +78,14 @@ class Order(models.Model):
     expected_delivery_time = models.DateTimeField(
         null=True,
         blank=True,
-        help_text="Expected delivery time for immediate orders"
+        help_text="Auto-calculated for immediate orders"
     )
     
     # Additional info
-    notes = models.TextField(blank=True, help_text="Customer notes or special instructions")
+    notes = models.TextField(
+        blank=True,
+        help_text="Customer notes or special instructions"
+    )
     
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
@@ -97,7 +111,6 @@ class Order(models.Model):
         if not self.order_number:
             import datetime
             date_str = datetime.datetime.now().strftime('%Y%m%d')
-            # Format: ORD20250127001
             last_order = Order.objects.filter(
                 order_number__startswith=f'ORD{date_str}'
             ).order_by('-order_number').first()
@@ -112,7 +125,6 @@ class Order(models.Model):
         
         # Set expected delivery time for immediate orders
         if self.delivery_type == 'immediate' and not self.expected_delivery_time:
-            # Get immediate delivery time from service (default 120 minutes)
             delivery_minutes = getattr(self.service, 'immediate_delivery_time', 120)
             self.expected_delivery_time = timezone.now() + timezone.timedelta(minutes=delivery_minutes)
         
@@ -149,41 +161,8 @@ class Order(models.Model):
         return f"Order {self.order_number} - {self.customer.username}"
 
 
-class OrderItem(models.Model):
-    """
-    Individual items in an order (for future multi-item orders)
-    """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    order = models.ForeignKey(
-        Order,
-        on_delete=models.CASCADE,
-        related_name='items'
-    )
-    service = models.ForeignKey(
-        Service,
-        on_delete=models.PROTECT
-    )
-    quantity = models.IntegerField(default=1)
-    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
-    total_price = models.DecimalField(max_digits=10, decimal_places=2)
-    
-    created_at = models.DateTimeField(auto_now_add=True)
-    
-    class Meta:
-        db_table = 'order_items'
-    
-    def save(self, *args, **kwargs):
-        self.total_price = self.quantity * self.unit_price
-        super().save(*args, **kwargs)
-    
-    def __str__(self):
-        return f"{self.service.name} x {self.quantity}"
-
-
 class OrderStatusHistory(models.Model):
-    """
-    Track order status changes for transparency
-    """
+    """Track order status changes for transparency"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     order = models.ForeignKey(
         Order,

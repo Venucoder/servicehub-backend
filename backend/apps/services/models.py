@@ -1,3 +1,4 @@
+# backend/apps/services/models.py
 import uuid
 from django.db import models
 from django.conf import settings
@@ -44,15 +45,12 @@ class ServiceProvider(models.Model):
     business_phone = models.CharField(max_length=15)
     business_email = models.EmailField()
     
-    # Verification
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     verified_at = models.DateTimeField(null=True, blank=True)
     
-    # Business details
     gst_number = models.CharField(max_length=15, blank=True, null=True)
     pan_number = models.CharField(max_length=10, blank=True, null=True)
     
-    # Ratings
     average_rating = models.DecimalField(max_digits=3, decimal_places=2, default=0.00)
     total_ratings = models.IntegerField(default=0)
     
@@ -72,11 +70,6 @@ class ServiceProvider(models.Model):
 
 class Service(models.Model):
     """Individual services offered by providers"""
-    PRICING_TYPE_CHOICES = (
-        ('per_unit', 'Per Unit'),
-        ('subscription', 'Subscription Only'),
-        ('both', 'Both'),
-    )
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     provider = models.ForeignKey(
@@ -92,11 +85,25 @@ class Service(models.Model):
     
     name = models.CharField(max_length=255)
     description = models.TextField()
-    pricing_type = models.CharField(max_length=20, choices=PRICING_TYPE_CHOICES)
     
     # Pricing
-    base_price = models.DecimalField(max_digits=10, decimal_places=2)
-    unit = models.CharField(max_length=50, help_text="e.g., bottle, kg, litre")
+    base_price = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2,
+        help_text="Price per unit (e.g., ₹10 per can)"
+    )
+    unit = models.CharField(
+        max_length=50, 
+        help_text="e.g., can, liter, piece, kg"
+    )
+    
+    # Quantity options for one-time orders
+    quantity_options = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Example: [{"label": "250ml", "value": 0.25, "price": 15}, {"label": "1 Liter", "value": 1, "price": 60}]'
+    )
+    
     minimum_order = models.IntegerField(default=1)
     
     # Availability
@@ -107,21 +114,28 @@ class Service(models.Model):
     has_stock_tracking = models.BooleanField(default=True)
     current_stock = models.IntegerField(default=0)
     
-    # Business hours (NEW)
+    # Business hours
     business_hours_start = models.TimeField(default='06:00:00')
     business_hours_end = models.TimeField(default='22:00:00')
-    
-    # Operating days (NEW)
     operating_days = models.JSONField(
         default=list,
-        help_text="Days service is available: ['monday', 'tuesday', ...]"
+        help_text='["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]'
     )
     
-    # Immediate delivery settings (NEW)
-    supports_immediate_delivery = models.BooleanField(default=True)
+    # Delivery options
+    supports_immediate_delivery = models.BooleanField(
+        default=True,
+        help_text="Can customers order for immediate delivery?"
+    )
     immediate_delivery_time = models.IntegerField(
         default=120,
-        help_text="Minutes for immediate delivery (e.g., 120 = within 2 hours)"
+        help_text="Expected delivery time in minutes (e.g., 120 = 2 hours)"
+    )
+    
+    # Feature flags
+    supports_prepaid_cards = models.BooleanField(
+        default=True,
+        help_text="Does this service support prepaid cards?"
     )
     
     created_at = models.DateTimeField(auto_now_add=True)
@@ -139,31 +153,40 @@ class Service(models.Model):
         return f"{self.name} - {self.provider.business_name}"
 
 
-class SubscriptionPackage(models.Model):
+class PrepaidCardOption(models.Model):
     """
-    Subscription packages created by service providers
-    Provider defines: 20 units @ ₹140, 30 units @ ₹210, etc.
+    Prepaid card options - like buying a physical punch card
+    Example: "30-can water card for ₹270"
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     service = models.ForeignKey(
         Service,
         on_delete=models.CASCADE,
-        related_name='subscription_packages'
+        related_name='prepaid_card_options'
     )
     
-    # Package details
+    # Card details
     name = models.CharField(
         max_length=100,
-        help_text="e.g., 'Starter Pack', 'Value Pack', 'Family Pack'"
+        help_text="e.g., 'Starter Pack', '30-Can Card', 'Monthly Card'"
     )
-    units = models.IntegerField(help_text="Total units in package")
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    total_units = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Total units in card (e.g., 30 cans, 30 liters, 50 pieces)"
+    )
+    price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Total price for the card"
+    )
     
-    # Calculated fields
+    # Auto-calculated fields
     price_per_unit = models.DecimalField(
         max_digits=10,
         decimal_places=2,
-        editable=False
+        editable=False,
+        help_text="Calculated: price / total_units"
     )
     savings = models.DecimalField(
         max_digits=10,
@@ -172,7 +195,7 @@ class SubscriptionPackage(models.Model):
         help_text="Savings compared to base price"
     )
     
-    # Validity
+    # Display
     is_active = models.BooleanField(default=True)
     display_order = models.IntegerField(
         default=0,
@@ -183,142 +206,105 @@ class SubscriptionPackage(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
-        db_table = 'subscription_packages'
-        ordering = ['display_order', 'units']
+        db_table = 'prepaid_card_options'
+        ordering = ['service', 'display_order', 'total_units']
         indexes = [
             models.Index(fields=['service', 'is_active']),
         ]
     
     def save(self, *args, **kwargs):
         # Auto-calculate price per unit
-        if self.units > 0:
-            self.price_per_unit = self.price / self.units
+        if self.total_units > 0:
+            self.price_per_unit = self.price / self.total_units
         
-        # Auto-calculate savings vs base price
+        # Auto-calculate savings
         if self.service:
-            base_total = self.service.base_price * self.units
+            base_total = self.service.base_price * self.total_units
             self.savings = base_total - self.price
         
         super().save(*args, **kwargs)
     
     def __str__(self):
-        return f"{self.service.name} - {self.name} ({self.units} units)"
+        return f"{self.service.name} - {self.name} ({self.total_units} units)"
 
 
-class Subscription(models.Model):
+class PrepaidCard(models.Model):
     """
-    Customer subscriptions - unit-based, flexible usage
+    Digital prepaid card owned by customer
+    Like physical punch card with 30 boxes
     """
     STATUS_CHOICES = (
         ('active', 'Active'),
-        ('paused', 'Paused'),
-        ('completed', 'Completed'),
+        ('exhausted', 'Exhausted'),  # All units used
         ('cancelled', 'Cancelled'),
-    )
-    
-    DELIVERY_TYPE = (
-        ('self_pickup', 'Self Pickup'),
-        ('auto_delivery', 'Auto Delivery'),
     )
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     customer = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name='subscriptions'
+        related_name='prepaid_cards'
     )
-    package = models.ForeignKey(
-        SubscriptionPackage,
+    card_option = models.ForeignKey(
+        PrepaidCardOption,
         on_delete=models.PROTECT,
-        related_name='subscriptions'
+        related_name='issued_cards'
     )
     
-    # Subscription details
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
-    delivery_type = models.CharField(max_length=20, choices=DELIVERY_TYPE)
-    
-    # Unit tracking (CORE FEATURE)
-    total_units = models.IntegerField()
-    used_units = models.IntegerField(default=0)
-    remaining_units = models.IntegerField()
+    # Card details
+    total_units = models.DecimalField(max_digits=10, decimal_places=2)
+    used_units = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    remaining_units = models.DecimalField(max_digits=10, decimal_places=2)
     
     # Pricing
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
     per_unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     
-    # Auto-delivery settings (only if delivery_type = 'auto_delivery')
-    delivery_address = models.TextField(blank=True, null=True)
-    preferred_time = models.TimeField(blank=True, null=True)
-    delivery_days = models.JSONField(
-        default=list,
-        blank=True,
-        help_text="Days for auto-delivery: ['monday', 'wednesday', 'friday']"
-    )
-    units_per_delivery = models.IntegerField(
-        default=1,
-        help_text="Units to deliver each time"
-    )
+    # Status
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
     
     # Timestamps
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-    paused_at = models.DateTimeField(null=True, blank=True)
-    completed_at = models.DateTimeField(null=True, blank=True)
+    purchased_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    exhausted_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
     
     class Meta:
-        db_table = 'subscriptions'
-        ordering = ['-created_at']
+        db_table = 'prepaid_cards'
+        ordering = ['-purchased_at']
         indexes = [
             models.Index(fields=['customer', 'status']),
-            models.Index(fields=['package']),
-            models.Index(fields=['created_at']),
+            models.Index(fields=['card_option']),
+            models.Index(fields=['purchased_at']),
         ]
     
     def save(self, *args, **kwargs):
         # Auto-calculate remaining units
         self.remaining_units = self.total_units - self.used_units
         
-        # Auto-complete if all units used
-        if self.remaining_units == 0 and self.status == 'active':
-            self.status = 'completed'
-            self.completed_at = timezone.now()
+        # Auto-update status if exhausted
+        if self.remaining_units <= 0 and self.status == 'active':
+            self.status = 'exhausted'
+            self.exhausted_at = timezone.now()
         
         super().save(*args, **kwargs)
     
-    def use_units(self, quantity=1):
-        """Mark units as used"""
+    def use_units(self, quantity):
+        """Mark units as used - like punching boxes on physical card"""
         if self.status != 'active':
-            return False, "Subscription is not active"
+            return False, f"Card is {self.status}"
         
         if self.remaining_units < quantity:
             return False, f"Not enough units. Only {self.remaining_units} remaining"
         
         self.used_units += quantity
+        self.last_used_at = timezone.now()
         self.save()
         return True, "Units marked as used"
     
-    def pause(self):
-        """Pause subscription"""
-        if self.status == 'active':
-            self.status = 'paused'
-            self.paused_at = timezone.now()
-            self.save()
-            return True
-        return False
-    
-    def resume(self):
-        """Resume subscription"""
-        if self.status == 'paused' and self.remaining_units > 0:
-            self.status = 'active'
-            self.paused_at = None
-            self.save()
-            return True
-        return False
-    
     def cancel(self):
-        """Cancel subscription"""
-        if self.status in ['active', 'paused']:
+        """Cancel the card"""
+        if self.status == 'active':
             self.status = 'cancelled'
             self.cancelled_at = timezone.now()
             self.save()
@@ -326,51 +312,50 @@ class Subscription(models.Model):
         return False
     
     def __str__(self):
-        return f"{self.customer.username} - {self.package.service.name} ({self.remaining_units}/{self.total_units})"
+        return f"{self.customer.username} - {self.card_option.service.name} ({self.remaining_units}/{self.total_units})"
 
 
-class SubscriptionUsage(models.Model):
+class CardUsage(models.Model):
     """
-    Track each time customer uses units from subscription
-    Digital punch card system
+    Track each usage of prepaid card
+    Like marking a box on physical punch card with date
     """
-    USAGE_TYPE = (
-        ('pickup', 'Self Pickup'),
-        ('delivered', 'Delivered'),
-    )
-    
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    subscription = models.ForeignKey(
-        Subscription,
+    card = models.ForeignKey(
+        PrepaidCard,
         on_delete=models.CASCADE,
         related_name='usage_history'
     )
     
-    units_used = models.IntegerField(default=1)
-    usage_type = models.CharField(max_length=20, choices=USAGE_TYPE)
+    # Usage details
+    units_used = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="How many units were used (e.g., 1 can, 0.5 liter, 3 pieces)"
+    )
     
-    # For pickups
-    picked_up_at = models.DateTimeField(null=True, blank=True)
-    
-    # For deliveries
-    delivered_at = models.DateTimeField(null=True, blank=True)
-    delivered_by = models.ForeignKey(
+    # Who marked it
+    marked_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
         null=True,
-        blank=True,
-        related_name='deliveries_made'
+        related_name='marked_card_usages',
+        help_text="Vendor who marked the card"
     )
     
-    notes = models.TextField(blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    # When & where
+    used_at = models.DateTimeField(auto_now_add=True)
+    notes = models.TextField(
+        blank=True,
+        help_text="e.g., 'Picked up at shop', 'Delivered to home'"
+    )
     
     class Meta:
-        db_table = 'subscription_usage'
-        ordering = ['-created_at']
+        db_table = 'card_usage'
+        ordering = ['-used_at']
         indexes = [
-            models.Index(fields=['subscription', 'created_at']),
+            models.Index(fields=['card', 'used_at']),
         ]
     
     def __str__(self):
-        return f"{self.subscription.customer.username} - {self.units_used} units ({self.usage_type})"
+        return f"{self.card.customer.username} - Used {self.units_used} units on {self.used_at.date()}"
