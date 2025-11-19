@@ -1,28 +1,36 @@
+# backend/apps/services/views.py
 from rest_framework import viewsets, permissions, filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
+from decimal import Decimal
 from .models import (
     ServiceCategory,
     ServiceProvider,
     Service,
-    SubscriptionPackage,
-    Subscription,
-    SubscriptionUsage
+    PrepaidCardOption,
+    PrepaidCard,
+    CardUsage
 )
 from .serializers import (
     ServiceCategorySerializer,
     ServiceProviderSerializer,
     ServiceSerializer,
     ServiceListSerializer,
-    SubscriptionPackageSerializer,
-    SubscriptionSerializer,
-    SubscriptionListSerializer,
-    CreateSubscriptionSerializer,
-    SubscriptionUsageSerializer
+    PrepaidCardOptionSerializer,
+    PrepaidCardOptionCreateSerializer,
+    PrepaidCardSerializer,
+    PrepaidCardListSerializer,
+    CreatePrepaidCardSerializer,
+    UseCardSerializer,
+    CardUsageSerializer
 )
 
+
+# ============================================
+# Category & Provider ViewSets
+# ============================================
 
 class ServiceCategoryViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for Service Categories (Read-only for customers)"""
@@ -70,12 +78,16 @@ class ServiceProviderViewSet(viewsets.ModelViewSet):
             )
 
 
+# ============================================
+# Service ViewSet
+# ============================================
+
 class ServiceViewSet(viewsets.ModelViewSet):
     """ViewSet for Services"""
     queryset = Service.objects.all()
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['category', 'pricing_type', 'is_available']
+    filterset_fields = ['category', 'is_available', 'supports_prepaid_cards']
     search_fields = ['name', 'description']
     ordering_fields = ['base_price', 'created_at']
     
@@ -124,85 +136,121 @@ class ServiceViewSet(viewsets.ModelViewSet):
         })
     
     @action(detail=True, methods=['get'])
-    def packages(self, request, pk=None):
-        """Get subscription packages for a service"""
+    def prepaid_card_options(self, request, pk=None):
+        """Get prepaid card options for a service"""
         service = self.get_object()
-        packages = SubscriptionPackage.objects.filter(
+        
+        if not service.supports_prepaid_cards:
+            return Response({
+                'message': 'This service does not support prepaid cards',
+                'options': []
+            })
+        
+        options = PrepaidCardOption.objects.filter(
             service=service,
             is_active=True
-        )
-        serializer = SubscriptionPackageSerializer(packages, many=True)
+        ).order_by('display_order', 'total_units')
+        
+        serializer = PrepaidCardOptionSerializer(options, many=True)
         return Response(serializer.data)
 
 
-class SubscriptionPackageViewSet(viewsets.ModelViewSet):
-    """ViewSet for Subscription Packages"""
-    queryset = SubscriptionPackage.objects.all()
-    serializer_class = SubscriptionPackageSerializer
+# ============================================
+# Prepaid Card Option ViewSet
+# ============================================
+
+class PrepaidCardOptionViewSet(viewsets.ModelViewSet):
+    """ViewSet for Prepaid Card Options (Providers create, Customers view)"""
+    queryset = PrepaidCardOption.objects.all()
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['service', 'is_active']
-    ordering_fields = ['display_order', 'price', 'units']
+    ordering_fields = ['display_order', 'price', 'total_units']
+    
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return PrepaidCardOptionCreateSerializer
+        return PrepaidCardOptionSerializer
     
     def get_queryset(self):
-        """Providers see their packages, customers see active packages"""
+        """Providers see their options, customers see active options"""
         user = self.request.user
         if user.role == 'provider':
-            return SubscriptionPackage.objects.filter(service__provider__user=user)
-        return SubscriptionPackage.objects.filter(is_active=True)
+            return PrepaidCardOption.objects.filter(service__provider__user=user)
+        return PrepaidCardOption.objects.filter(is_active=True)
+    
+    def perform_create(self, serializer):
+        """Only providers can create card options for their services"""
+        service = serializer.validated_data['service']
+        if service.provider.user != self.request.user:
+            raise permissions.PermissionDenied("You can only create options for your own services")
+        serializer.save()
 
 
-class SubscriptionViewSet(viewsets.ModelViewSet):
-    """ViewSet for Subscriptions"""
-    queryset = Subscription.objects.all()
+# ============================================
+# Prepaid Card ViewSet
+# ============================================
+
+class PrepaidCardViewSet(viewsets.ModelViewSet):
+    """ViewSet for Prepaid Cards (Customer's purchased cards)"""
+    queryset = PrepaidCard.objects.all()
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['status', 'delivery_type']
-    ordering_fields = ['created_at']
+    filterset_fields = ['status']
+    ordering_fields = ['purchased_at', 'last_used_at']
+    http_method_names = ['get', 'post', 'delete']  # No PUT/PATCH
     
     def get_serializer_class(self):
         """Use different serializers for different actions"""
         if self.action == 'create':
-            return CreateSubscriptionSerializer
+            return CreatePrepaidCardSerializer
         elif self.action == 'list':
-            return SubscriptionListSerializer
-        return SubscriptionSerializer
+            return PrepaidCardListSerializer
+        return PrepaidCardSerializer
     
     def get_queryset(self):
-        """Users see only their own subscriptions"""
+        """Users see only their own prepaid cards"""
         user = self.request.user
         if user.role == 'admin':
-            return Subscription.objects.all()
-        return Subscription.objects.filter(customer=user)
+            return PrepaidCard.objects.all()
+        return PrepaidCard.objects.filter(customer=user)
     
     def perform_create(self, serializer):
-        """Create subscription with automatic calculations"""
-        package_id = self.request.data.get('package_id')
-        package = SubscriptionPackage.objects.get(id=package_id)
+        """Buy/Create prepaid card"""
+        card_option_id = serializer.validated_data.get('card_option_id')
+        card_option = PrepaidCardOption.objects.get(id=card_option_id)
         
+        # Create the prepaid card
         serializer.save(
             customer=self.request.user,
-            package=package,
-            total_units=package.units,
-            total_amount=package.price,
-            per_unit_price=package.price_per_unit
+            card_option=card_option,
+            total_units=card_option.total_units,
+            total_amount=card_option.price,
+            per_unit_price=card_option.price_per_unit
         )
     
     @action(detail=True, methods=['post'])
     def use_units(self, request, pk=None):
         """
         Mark units as used (digital punch card)
-        POST /api/subscriptions/{id}/use_units/
-        Body: {"units": 1, "usage_type": "pickup" or "delivered"}
+        POST /api/services/prepaid-cards/{id}/use_units/
+        Body: {"units": 1.5, "notes": "Picked up at shop"}
         """
-        subscription = self.get_object()
+        card = self.get_object()
+        serializer = UseCardSerializer(data=request.data)
         
-        units = request.data.get('units', 1)
-        usage_type = request.data.get('usage_type', 'pickup')
-        notes = request.data.get('notes', '')
+        if not serializer.is_valid():
+            return Response(
+                serializer.errors,
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
-        # Validate
-        success, message = subscription.use_units(units)
+        units = serializer.validated_data['units']
+        notes = serializer.validated_data.get('notes', '')
+        
+        # Use the units
+        success, message = card.use_units(units)
+        
         if not success:
             return Response(
                 {'error': message},
@@ -210,97 +258,61 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
             )
         
         # Create usage record
-        usage_data = {
-            'subscription': subscription,
-            'units_used': units,
-            'usage_type': usage_type,
-            'notes': notes
-        }
-        
-        if usage_type == 'pickup':
-            usage_data['picked_up_at'] = timezone.now()
-        else:
-            usage_data['delivered_at'] = timezone.now()
-            usage_data['delivered_by'] = request.user
-        
-        SubscriptionUsage.objects.create(**usage_data)
+        CardUsage.objects.create(
+            card=card,
+            units_used=units,
+            marked_by=request.user,
+            notes=notes
+        )
         
         return Response({
             'message': message,
-            'used_units': subscription.used_units,
-            'remaining_units': subscription.remaining_units,
-            'status': subscription.status
+            'used_units': str(card.used_units),
+            'remaining_units': str(card.remaining_units),
+            'status': card.status
         })
     
     @action(detail=True, methods=['post'])
-    def pause(self, request, pk=None):
-        """Pause subscription"""
-        subscription = self.get_object()
-        
-        if subscription.pause():
-            return Response({
-                'message': 'Subscription paused successfully',
-                'status': subscription.status
-            })
-        
-        return Response(
-            {'error': 'Cannot pause this subscription'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    @action(detail=True, methods=['post'])
-    def resume(self, request, pk=None):
-        """Resume subscription"""
-        subscription = self.get_object()
-        
-        if subscription.resume():
-            return Response({
-                'message': 'Subscription resumed successfully',
-                'status': subscription.status
-            })
-        
-        return Response(
-            {'error': 'Cannot resume this subscription'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
-        """Cancel subscription"""
-        subscription = self.get_object()
+        """Cancel prepaid card"""
+        card = self.get_object()
         
-        if subscription.cancel():
+        if card.cancel():
             return Response({
-                'message': 'Subscription cancelled successfully',
-                'status': subscription.status
+                'message': 'Prepaid card cancelled successfully',
+                'status': card.status
             })
         
         return Response(
-            {'error': 'Cannot cancel this subscription'},
+            {'error': 'Cannot cancel this card'},
             status=status.HTTP_400_BAD_REQUEST
         )
     
     @action(detail=True, methods=['get'])
     def usage_history(self, request, pk=None):
-        """Get usage history for subscription"""
-        subscription = self.get_object()
-        usage = SubscriptionUsage.objects.filter(subscription=subscription)
-        serializer = SubscriptionUsageSerializer(usage, many=True)
+        """Get usage history for prepaid card"""
+        card = self.get_object()
+        usage = CardUsage.objects.filter(card=card).order_by('-used_at')
+        serializer = CardUsageSerializer(usage, many=True)
         return Response(serializer.data)
 
 
-class SubscriptionUsageViewSet(viewsets.ReadOnlyModelViewSet):
-    """ViewSet for Subscription Usage (Read-only)"""
-    queryset = SubscriptionUsage.objects.all()
-    serializer_class = SubscriptionUsageSerializer
+# ============================================
+# Card Usage ViewSet
+# ============================================
+
+class CardUsageViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet for Card Usage (Read-only, history tracking)"""
+    queryset = CardUsage.objects.all()
+    serializer_class = CardUsageSerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['subscription', 'usage_type']
-    ordering_fields = ['created_at']
+    filterset_fields = ['card']
+    ordering_fields = ['used_at']
     
     def get_queryset(self):
         """Users see their own usage history"""
         user = self.request.user
         if user.role == 'admin':
-            return SubscriptionUsage.objects.all()
-        return SubscriptionUsage.objects.filter(subscription__customer=user)
+            return CardUsage.objects.all()
+        return CardUsage.objects.filter(card__customer=user)

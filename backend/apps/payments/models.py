@@ -1,13 +1,14 @@
+# backend/apps/payments/models.py
 import uuid
 from django.db import models
 from django.conf import settings
 from apps.orders.models import Order
-from apps.services.models import Subscription
+from apps.services.models import PrepaidCard
 
 
 class Payment(models.Model):
     """
-    Payment transactions for orders and subscriptions
+    Payment transactions for orders and prepaid cards
     """
     PAYMENT_STATUS = (
         ('pending', 'Pending'),
@@ -39,14 +40,16 @@ class Payment(models.Model):
         on_delete=models.PROTECT,
         related_name='payments',
         null=True,
-        blank=True
+        blank=True,
+        help_text="Payment for one-time order"
     )
-    subscription = models.ForeignKey(
-        Subscription,
+    prepaid_card = models.ForeignKey(
+        PrepaidCard,
         on_delete=models.PROTECT,
         related_name='payments',
         null=True,
-        blank=True
+        blank=True,
+        help_text="Payment for prepaid card purchase"
     )
     
     # Payment details

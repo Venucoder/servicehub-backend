@@ -8,7 +8,7 @@ from apps.services.models import Service
 
 class Order(models.Model):
     """
-    One-time orders (NOT prepaid cards)
+    One-time orders ONLY (NOT prepaid cards)
     Can be immediate or scheduled
     """
     ORDER_STATUS = (
@@ -41,10 +41,10 @@ class Order(models.Model):
         related_name='orders'
     )
     
-    # Order details
+    # Order details - No order_type needed (always one-time)
     status = models.CharField(max_length=20, choices=ORDER_STATUS, default='pending')
     
-    # Quantity
+    # Quantity (decimal for flexible options like 0.5L, 2.5kg)
     quantity = models.DecimalField(
         max_digits=10,
         decimal_places=2,

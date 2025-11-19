@@ -3,6 +3,7 @@ import uuid
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
+from decimal import Decimal
 
 
 class ServiceCategory(models.Model):
@@ -90,14 +91,14 @@ class Service(models.Model):
     base_price = models.DecimalField(
         max_digits=10, 
         decimal_places=2,
-        help_text="Price per unit (e.g., ₹10 per can)"
+        help_text="Price per unit for one-time orders (e.g., ₹10 per can)"
     )
     unit = models.CharField(
         max_length=50, 
         help_text="e.g., can, liter, piece, kg"
     )
     
-    # Quantity options for one-time orders
+    # Quantity options for one-time orders (NEW)
     quantity_options = models.JSONField(
         default=list,
         blank=True,
@@ -132,7 +133,7 @@ class Service(models.Model):
         help_text="Expected delivery time in minutes (e.g., 120 = 2 hours)"
     )
     
-    # Feature flags
+    # Feature flags (NEW)
     supports_prepaid_cards = models.BooleanField(
         default=True,
         help_text="Does this service support prepaid cards?"
@@ -153,10 +154,14 @@ class Service(models.Model):
         return f"{self.name} - {self.provider.business_name}"
 
 
+# ============================================
+# NEW MODELS: Prepaid Card System
+# ============================================
+
 class PrepaidCardOption(models.Model):
     """
-    Prepaid card options - like buying a physical punch card
-    Example: "30-can water card for ₹270"
+    Prepaid card options available for purchase
+    Like: "30-can water card for ₹270"
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     service = models.ForeignKey(
@@ -297,7 +302,7 @@ class PrepaidCard(models.Model):
         if self.remaining_units < quantity:
             return False, f"Not enough units. Only {self.remaining_units} remaining"
         
-        self.used_units += quantity
+        self.used_units += Decimal(str(quantity))
         self.last_used_at = timezone.now()
         self.save()
         return True, "Units marked as used"
@@ -312,7 +317,8 @@ class PrepaidCard(models.Model):
         return False
     
     def __str__(self):
-        return f"{self.customer.username} - {self.card_option.service.name} ({self.remaining_units}/{self.total_units})"
+        service_name = self.card_option.service.name
+        return f"{self.customer.username} - {service_name} ({self.remaining_units}/{self.total_units})"
 
 
 class CardUsage(models.Model):
